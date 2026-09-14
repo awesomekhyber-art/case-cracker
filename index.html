@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Case Cracker — Board Exam Arcade</title>
-<link rel="icon" type="image/png" href="/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -1410,8 +1409,12 @@ function startGame(){
   distractorOpen = new Set();
   currentForgeResult = null;
   savedVisualMemory = null;
+  autoForgeStatus = null;
+  autoForgeError = '';
+  currentCaseToken = (currentCaseToken || 0) + 1; // invalidates any in-flight request tied to the PREVIOUS case
   renderRail();
   renderStage();
+  startAutoForge(); // earliest safe point: right after /api/case has resolved and caseData is set
 }
 
 function renderRail(){
@@ -1750,6 +1753,11 @@ function renderMnemonic(){
 let currentForgeResult = null; // {type, prompt, model, mimeType, base64, objectUrl, saved} for THIS case's most recent generation
 let savedVisualMemory = null;  // small metadata reference (NO image bytes) attached to the deck entry if the learner saves one
 let forgeHQ = false;           // use gpt-image-2.5-sunburst instead of flare
+let currentCaseToken = 0;      // bumped every time a new case starts or a deck entry is opened — any in-flight
+                                // image request captures this and discards its result if the token has since
+                                // changed, so a slow request from an abandoned case can never attach to a new one
+let autoForgeStatus = null;    // null (nothing auto-started, e.g. no memoryPalace prompt) | 'pending' | 'done' | 'error'
+let autoForgeError = '';
 
 const FORGE_LOADING_MESSAGES = [
   'Sketching the scene…', 'Mixing the metaphor…', 'Rendering the memory…', 'Almost there…'
@@ -1759,11 +1767,83 @@ function initForgePanel(){
   document.querySelectorAll('#forge-buttons .forge-btn').forEach(btn=>{
     btn.addEventListener('click', ()=> requestForgeImage(btn.dataset.type, null, forgeHQ));
   });
-  // If we already generated something for this case (e.g. navigated back
-  // from the Quiz stage and returned), show it again instead of losing it.
+  // Reaching this stage (including re-navigating back to it) NEVER starts a
+  // new request on its own — it only reflects whatever state the automatic
+  // (or a prior manual) generation is already in.
+  renderForgeCurrentState();
+}
+
+// Shows whatever the Forge's current state actually is — a finished image,
+// an in-progress spinner (for the automatic background generation), a clean
+// failure with Retry, or nothing (no auto-eligible prompt, buttons idle).
+// Safe to call whether or not the learner is currently on this stage.
+function renderForgeCurrentState(){
+  const resultEl = document.getElementById('forge-result');
+  if(!resultEl) return; // learner isn't on the Lock It In stage right now — nothing to update
   if(currentForgeResult){
     renderForgeImageResult(currentForgeResult);
+  } else if(autoForgeStatus === 'pending'){
+    resultEl.innerHTML = `<div class="forge-loading"><div class="forge-spin"></div>Your memory image is still being forged…</div>`;
+  } else if(autoForgeStatus === 'error'){
+    resultEl.innerHTML = `
+      <div class="forge-error">Couldn't forge that image (${escapeHTML(autoForgeError || 'unknown error')}). Image generation occasionally hiccups — the rest of your case is unaffected.</div>
+      <div class="forge-controls"><button class="forge-control-btn" id="forge-retry-btn">🔄 Retry</button></div>`;
+    const retryBtn = document.getElementById('forge-retry-btn');
+    if(retryBtn) retryBtn.addEventListener('click', ()=> requestForgeImage('memoryPalace', null, forgeHQ));
   }
+  // else: autoForgeStatus is null (no memoryPalace prompt existed) — leave
+  // the result area empty; the three buttons above are still fully usable.
+}
+
+// Kicks off the default Memory Palace generation automatically, as early as
+// possible (right after /api/case resolves) and fully in the background —
+// it never blocks case rendering/navigation and is safe to call even while
+// the learner is still on the Guess stage, long before the Forge panel
+// exists in the DOM.
+function startAutoForge(){
+  const visual = (caseData.visuals || {}).memoryPalace;
+  if(!visual || !visual.prompt){ autoForgeStatus = null; return; }
+  autoForgeStatus = 'pending';
+  autoForgeError = '';
+  const myToken = currentCaseToken;
+  const model = 'gpt-image-2.5-flare';
+
+  fetch('/api/image', apiFetchOptions({
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: visual.prompt, model, visualType: 'memoryPalace' })
+  })).then(async (response)=>{
+    if(myToken !== currentCaseToken) return; // learner already moved to a different case — discard
+    if(response.status === 401){
+      handleUnauthorized();
+      autoForgeStatus = 'error';
+      autoForgeError = 'Access PIN needed — please re-enter it.';
+      renderForgeCurrentState();
+      return;
+    }
+    const data = await response.json();
+    if(myToken !== currentCaseToken) return; // re-check after the await — case may have changed mid-parse
+    if(!response.ok || !data.success || !data.image || !data.image.data){
+      autoForgeStatus = 'error';
+      autoForgeError = (data.error && data.error.message) || 'Image generation failed';
+      renderForgeCurrentState();
+      return;
+    }
+    const objectUrl = base64ToObjectURL(data.image.data, data.image.mimeType);
+    const result = {
+      type: 'memoryPalace', prompt: visual.prompt, model: data.image.model || model,
+      mimeType: data.image.mimeType || 'image/png', base64: data.image.data, objectUrl,
+      saved: false
+    };
+    currentForgeResult = result;
+    autoForgeStatus = 'done';
+    persistForgeImage(result).finally(()=> renderForgeCurrentState());
+  }).catch((err)=>{
+    if(myToken !== currentCaseToken) return;
+    autoForgeStatus = 'error';
+    autoForgeError = (err && err.message) || 'Network error';
+    renderForgeCurrentState();
+  });
 }
 
 const FORGE_MODIFIERS = {
@@ -1772,9 +1852,9 @@ const FORGE_MODIFIERS = {
   unhinged: ' Make it more absurd, funny, and over-the-top while keeping every medical association accurate.'
 };
 
-// Single entry point for every Forge generation — initial pick, reroll, and
-// all three "shift style" buttons. `modifier` is null for a plain
-// generate/reroll, or one of FORGE_MODIFIERS' keys for a style shift.
+// Single entry point for every MANUAL Forge generation — clicking a style
+// button, Reroll, or one of the three "shift style" buttons. `modifier` is
+// null for a plain generate/reroll, or one of FORGE_MODIFIERS' keys.
 // Image-generation failures are fully contained here: they can never affect
 // or interrupt the underlying case/quiz/deck flow, only this panel.
 async function requestForgeImage(type, modifier, useHQ){
@@ -1782,11 +1862,13 @@ async function requestForgeImage(type, modifier, useHQ){
   if(!visual || !visual.prompt) return;
   playFlip();
   const resultEl = document.getElementById('forge-result');
+  if(!resultEl) return; // defensive — this is only ever wired to buttons that exist on this stage
   const msg = FORGE_LOADING_MESSAGES[Math.floor(Math.random() * FORGE_LOADING_MESSAGES.length)];
   resultEl.innerHTML = `<div class="forge-loading"><div class="forge-spin"></div>${msg}</div>`;
 
   const model = useHQ ? 'gpt-image-2.5-sunburst' : 'gpt-image-2.5-flare';
   const prompt = visual.prompt + (modifier ? (FORGE_MODIFIERS[modifier] || '') : '');
+  const myToken = currentCaseToken;
 
   try{
     const response = await fetch('/api/image', apiFetchOptions({
@@ -1794,12 +1876,15 @@ async function requestForgeImage(type, modifier, useHQ){
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, model, visualType: type })
     }));
+    if(myToken !== currentCaseToken) return; // learner switched cases while this was in flight
     if(response.status === 401){
       handleUnauthorized();
-      resultEl.innerHTML = `<div class="forge-error">Access PIN needed — please re-enter it, then try again.</div>`;
+      const el = document.getElementById('forge-result');
+      if(el) el.innerHTML = `<div class="forge-error">Access PIN needed — please re-enter it, then try again.</div>`;
       return;
     }
     const data = await response.json();
+    if(myToken !== currentCaseToken) return;
     if(!response.ok || !data.success || !data.image || !data.image.data){
       throw new Error((data.error && data.error.message) || 'Image generation failed');
     }
@@ -1809,10 +1894,14 @@ async function requestForgeImage(type, modifier, useHQ){
       mimeType: data.image.mimeType || 'image/png', base64: data.image.data, objectUrl,
       saved: false
     };
+    autoForgeStatus = 'done';
     playCorrect();
     renderForgeImageResult(currentForgeResult);
   }catch(err){
-    resultEl.innerHTML = `
+    if(myToken !== currentCaseToken) return;
+    const el = document.getElementById('forge-result');
+    if(!el) return;
+    el.innerHTML = `
       <div class="forge-error">Couldn't forge that image (${escapeHTML(err.message)}). Image generation occasionally hiccups — the rest of your case is unaffected.</div>
       <div class="forge-controls"><button class="forge-control-btn" id="forge-retry-btn">🔄 Retry</button></div>`;
     const retryBtn = document.getElementById('forge-retry-btn');
@@ -1829,8 +1918,9 @@ function base64ToObjectURL(base64, mimeType){
 }
 
 function renderForgeImageResult(result){
-  const visual = (caseData.visuals || {})[result.type];
   const resultEl = document.getElementById('forge-result');
+  if(!resultEl) return; // learner navigated away before this had a DOM to render into
+  const visual = (caseData.visuals || {})[result.type];
   const isSaved = !!result.saved;
   resultEl.innerHTML = `
     <div class="forge-image-wrap"><img src="${result.objectUrl}" alt="Generated memory image" onerror="this.closest('.forge-image-wrap').innerHTML='<div class=&quot;forge-error&quot;>Image failed to load.</div>'"/></div>
@@ -1857,9 +1947,12 @@ function renderForgeImageResult(result){
   });
 }
 
-async function saveForgeImage(result){
+// The actual "write to IndexedDB + build the deck-safe metadata reference"
+// logic, with NO DOM dependency at all — safe to call from a background
+// completion (automatic generation) as well as from the manual Save button.
+async function persistForgeImage(result){
   const visual = (caseData.visuals || {})[result.type];
-  if(!visual) return;
+  if(!visual) return false;
   const id = `${(caseData.topic || 'case').replace(/[^a-z0-9]/gi,'_')}__${result.type}__${Date.now()}`;
   try{
     await window.imageCache.setFromBase64(id, result.base64, result.mimeType);
@@ -1875,9 +1968,18 @@ async function saveForgeImage(result){
       mechanismPrompt: visual.mechanismPrompt || ''
     };
     result.saved = true;
+    return true;
+  }catch(err){
+    return false;
+  }
+}
+
+async function saveForgeImage(result){
+  const ok = await persistForgeImage(result);
+  if(ok){
     showToast('❤️ Memory saved — it\'ll travel with this case in your Deck.', '');
     renderForgeImageResult(result); // re-render to flip the Save button to "Saved"
-  }catch(err){
+  } else {
     showToast('Could not save that image locally.', 'streak');
   }
 }
@@ -2094,6 +2196,10 @@ function reviewDeckEntry(idx){
   distractorOpen = new Set();
   currentForgeResult = null;
   savedVisualMemory = entry.visualMemory || null;
+  autoForgeStatus = null; // reviewing never auto-generates a new image — we're restoring the saved one
+  autoForgeError = '';
+  currentCaseToken = (currentCaseToken || 0) + 1; // invalidate any request still in flight from a case left mid-generation
+  const myToken = currentCaseToken;
   closeDeck();
   loadingEl.classList.remove('active');
   intakeEl.style.display = 'none';
@@ -2107,9 +2213,10 @@ function reviewDeckEntry(idx){
   // must never break just because a cached image is gone.
   if(entry.visualMemory && entry.visualMemory.id){
     window.imageCache.getObjectURL(entry.visualMemory.id).then(objectUrl=>{
+      if(myToken !== currentCaseToken) return; // learner moved on before this resolved
       if(objectUrl && savedVisualMemory && savedVisualMemory.id === entry.visualMemory.id){
         currentForgeResult = { type: entry.visualMemory.type, prompt: '', model: 'saved', mimeType: '', base64: '', objectUrl, saved: true };
-        if(STAGES[stageIdx] === 'mnemonic') renderForgeImageResult(currentForgeResult);
+        renderForgeCurrentState();
       }
     }).catch(()=>{ /* image may have been cleared from this browser — not fatal */ });
   }
