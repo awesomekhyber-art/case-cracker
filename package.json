@@ -1,0 +1,7 @@
+{
+  "name": "case-cracker",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Case Cracker — gamified board-exam study app, powered by Claude (case reasoning) and OpenAI GPT-Image (Visual Memory Forge)."
+}
