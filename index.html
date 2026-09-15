@@ -2758,11 +2758,11 @@ if(ttsSupported){
 }
 
 /* ============ INLINE SIMPLIFICATION TOGGLE ============ */
-// Off by default — with 15-30+ glossary terms per case, showing every single
-// plain-language explanation inline would bury the actual content. This lets
-// a learner opt in when they want maximum clarity (e.g. a brand-new topic)
-// and opt back out once they don't need it spelled out every time.
-let simplifyInline = false;
+// On by default now — the richer 3-part definitions (plain meaning + mental
+// image + phonetic hook) are meant to be read inline as part of the normal
+// flow. The toggle still exists for anyone who wants a cleaner, hover-only
+// read once they don't need every term spelled out.
+let simplifyInline = true;
 
 async function loadSimplifyPref(){
   try{
