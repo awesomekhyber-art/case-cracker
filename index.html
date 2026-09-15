@@ -56,6 +56,13 @@
     border:6px solid transparent; border-top-color:var(--amber); z-index:60;
   }
   @keyframes termTipIn{from{opacity:0; transform:translateX(-50%) translateY(3px);} to{opacity:1; transform:translateX(-50%) translateY(0);}}
+  /* Inline mode (toggled via "🧠 Simplify"): the hard term keeps a subtle
+     underline for visual continuity with hover mode, and the plain-language
+     explanation sits right after it in parentheses — always visible, no
+     interaction needed. Deliberately muted/italic so it reads as a quiet
+     aside, not competing with the main sentence. */
+  .term-original{ border-bottom:1.5px dotted var(--amber); }
+  .term-inline-def{ color:var(--muted); font-style:italic; font-size:0.93em; }
   .osf-q strong{color:var(--text); text-decoration:underline; text-decoration-color:var(--amber);}
   .osf-a strong{color:var(--amber);}
   .flip-back strong{color:var(--teal);}
@@ -120,6 +127,9 @@
   .stat-pill.level{color:var(--text); font-weight:700;}
   .stat-pill.deck-btn{color:var(--text); cursor:pointer; transition:border-color .15s ease;}
   .stat-pill.deck-btn:hover{border-color:var(--teal); color:var(--teal);}
+  .stat-pill.simplify-toggle-btn{color:var(--muted); cursor:pointer; transition:all .15s ease;}
+  .stat-pill.simplify-toggle-btn:hover{border-color:var(--muted); color:var(--text);}
+  .stat-pill.simplify-toggle-btn.active{border-color:var(--amber); color:var(--amber); background:var(--amber-dim);}
 
   /* ---------- Layout ---------- */
   .wrap{max-width:840px; margin:0 auto; padding:28px 20px 0;}
@@ -591,6 +601,7 @@
     <div class="stat-pill cases">📋 <span id="cases-val">0</span></div>
     <div class="stat-pill day-streak">📅 <span id="day-streak-val">0</span>d</div>
     <div class="stat-pill deck-btn" id="deck-open-btn">📚 Deck</div>
+    <div class="stat-pill simplify-toggle-btn" id="simplify-toggle-btn">🧠 Simplify</div>
   </div>
   <div class="level-bar-track"><div class="level-bar-fill" id="level-bar-fill"></div></div>
 </div>
@@ -2257,6 +2268,7 @@ function exportDeckToAnki(){
 }
 
 document.getElementById('deck-open-btn').addEventListener('click', openDeck);
+document.getElementById('simplify-toggle-btn').addEventListener('click', toggleSimplifyInline);
 document.getElementById('deck-close-btn').addEventListener('click', closeDeck);
 document.getElementById('deck-overlay').addEventListener('click', (e)=>{
   if(e.target.id === 'deck-overlay') closeDeck();
@@ -2418,16 +2430,24 @@ function escapeHTML(str){
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 // Escapes first (so there's no injection risk), then converts the model's
-// ⟦term|definition⟧ markers into hoverable/tappable glossary spans, then
-// its **bold** markers into real <strong> tags — all on already-safe text.
+// ⟦term|definition⟧ markers into EITHER a hoverable/tappable tooltip span
+// (default) OR a visible inline "term (plain-language explanation)" — the
+// learner toggles which via the "🧠 Simplify" control — then converts
+// **bold** markers into real <strong> tags. All on already-safe text.
 // (Uses distinctive Unicode brackets, not [[ ]], specifically so this markup
 // can never visually/structurally collide with real JSON array syntax.)
 function renderRich(str){
   let out = escapeHTML(str);
-  out = out.replace(/⟦(.+?)\|(.+?)⟧/g, (m, term, def) => {
-    const safeDef = def.replace(/"/g, '&quot;'); // out is already HTML-escaped; only quotes still need handling for the attribute
-    return `<span class="term" tabindex="0" data-def="${safeDef}">${term}</span>`;
-  });
+  if(simplifyInline){
+    out = out.replace(/⟦(.+?)\|(.+?)⟧/g, (m, term, def) =>
+      `<span class="term-original">${term}</span><span class="term-inline-def"> (${def})</span>`
+    );
+  } else {
+    out = out.replace(/⟦(.+?)\|(.+?)⟧/g, (m, term, def) => {
+      const safeDef = def.replace(/"/g, '&quot;'); // out is already HTML-escaped; only quotes still need handling for the attribute
+      return `<span class="term" tabindex="0" data-def="${safeDef}">${term}</span>`;
+    });
+  }
   out = out.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   return out;
 }
@@ -2737,9 +2757,44 @@ if(ttsSupported){
   document.getElementById('voice-settings-btn').style.display = 'none';
 }
 
+/* ============ INLINE SIMPLIFICATION TOGGLE ============ */
+// Off by default — with 15-30+ glossary terms per case, showing every single
+// plain-language explanation inline would bury the actual content. This lets
+// a learner opt in when they want maximum clarity (e.g. a brand-new topic)
+// and opt back out once they don't need it spelled out every time.
+let simplifyInline = false;
+
+async function loadSimplifyPref(){
+  try{
+    const r = await window.storage.get('cc-simplify-inline', false);
+    if(r && r.value !== undefined && r.value !== null) simplifyInline = JSON.parse(r.value);
+  }catch(e){ /* default to off */ }
+  updateSimplifyToggleUI();
+}
+async function saveSimplifyPref(){
+  try{ await window.storage.set('cc-simplify-inline', JSON.stringify(simplifyInline), false); }catch(e){}
+}
+function updateSimplifyToggleUI(){
+  const btn = document.getElementById('simplify-toggle-btn');
+  if(!btn) return;
+  btn.classList.toggle('active', simplifyInline);
+  btn.title = simplifyInline
+    ? 'Showing simple explanations inline — click to switch back to hover-only'
+    : 'Click to show a quick plain-language explanation inline after every hard term';
+}
+function toggleSimplifyInline(){
+  simplifyInline = !simplifyInline;
+  saveSimplifyPref();
+  updateSimplifyToggleUI();
+  // Re-render whatever's currently on screen so the change is visible right
+  // away, instead of only applying to the next stage the learner visits.
+  if(gameEl.classList.contains('active')) renderStage();
+}
+
 /* ============ INIT ============ */
 loadStats();
 loadDeck();
+loadSimplifyPref();
 </script>
 
 </body>
