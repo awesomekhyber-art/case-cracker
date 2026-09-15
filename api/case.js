@@ -8,6 +8,12 @@
 import { verifySessionCookie } from '../lib/session.js';
 import { rateLimit, getClientKey } from '../lib/ratelimit.js';
 
+// Vercel's default serverless function timeout is 10 seconds — too short for
+// a full case generation (long vignette + diagram + quiz + glossary can
+// genuinely take longer). This raises the ceiling; the actual allowed max
+// still depends on your Vercel plan (Hobby typically supports up to 60s).
+export const config = { maxDuration: 60 };
+
 const SYSTEM_PROMPT = `You are a board-exam content engine for USMLE/PANCE prep. You will be given a raw pasted vignette (which may include answer choices and possibly the correct answer / explanation). Respond ONLY with a single valid JSON object — no markdown fences, no preamble, no trailing commentary, nothing before the opening { or after the closing }. Match this exact schema:
 
 {
@@ -80,6 +86,8 @@ Differential comparison table guidance (the "compareTable" field):
 Content rules:
 - In "tldr", "clues[].flag", "pathophys" steps, "distractors[].reason", "oneStepFurther.answer", "mnemonic", and "analogy" — wrap the 1-3 most important words or short phrases per field in double asterisks for bold emphasis, e.g. "The **thoracic duct** gets nicked, so **chyle** leaks into the chest." Bold the specific diagnosis, key structure, key lab value, or key mechanism word — not whole sentences, not every field, and never more than 3 bolded spans in one field.
 - Separately, across ALL of those fields, mark EVERY genuinely clinical or technical term using ⟦term|definition⟧ syntax (using the special ⟦ ⟧ bracket characters shown here — NOT square brackets, NOT [[ ]]) so the reader can hover for a quick definition — be comprehensive, not selective. This includes: every named anatomic structure, every named disease/syndrome/eponym, every lab test or lab value term, every drug name or drug class, every physiologic process word (e.g. "vasodilation," "chemotaxis"), every abbreviation (spell it out in the definition), and any word a second- or third-year student might plausibly not know cold. If in doubt, mark it — err heavily toward over-marking rather than under-marking; a case might reasonably have 15-30+ marked terms across its full breakdown. The definition must be short (under 18 words), plain-language, and make sense standing alone without the surrounding sentence. The only things you should NOT mark: common everyday words, and a term you've already defined once earlier in the SAME field (don't re-define within one sentence/field, but DO re-mark it if it reappears in a different field — the reader may land on that field first). A term can be both bolded AND glossary-marked if it's genuinely both the key point and jargon — that's fine, nest the bold outside the glossary brackets like "**⟦term|definition⟧**". Example of the density expected — a single pathophys step might look like: "The ⟦thoracic duct|the body's main lymphatic vessel, draining fat-rich lymph into the venous system⟧ gets nicked during ⟦esophagectomy|surgical removal of part or all of the esophagus⟧, so **⟦chyle|the milky, fat-rich fluid carried by lymph vessels⟧** leaks into the ⟦pleural space|the thin fluid-filled space between the lungs and chest wall⟧." That's the level of coverage to aim for — nearly every non-trivial noun gets marked.
+
+DEFINITION QUALITY — aim for this richer 3-part structure whenever a natural hook exists (not forced for every single term, but the norm rather than the exception): (1) a short plain-language definition, (2) a quick vivid mental image ("think ___"), and (3) a phonetic/spelling hook that ties a piece of the term's own sound or spelling to its meaning. Join these as short sentences within the same definition string — no schema change, it's still just the text after the "|". Example, matching the exact pattern to aim for: ⟦mydriasis|abnormal dilation of the pupil. Think big eyes. Think myDRIasis for Dilation⟧. Another: ⟦bradycardia|an abnormally slow heart rate. Think a heart dragging its feet. BRADY sounds like "braking" — the heart is braking⟧. Skip the mental-image/phonetic parts only when a term genuinely doesn't lend itself to one (e.g. a plain abbreviation like "CBC") — a short plain definition alone is fine there. Because these are richer, definitions can run longer than before — up to about 30 words is fine when using the full 3-part structure.
 CRITICAL: use ONLY the ⟦ ⟧ characters for this glossary syntax, never square brackets [ ]. Square brackets are reserved for real JSON arrays in this schema (choices, clues, pathophys, distractors, quiz, diagramShapes) — reusing them as glossary delimiters is what causes bracket-mismatch parse failures in dense text. ⟦ ⟧ can never be confused with JSON array syntax, which is exactly why they're used here.
 - If answer choices are present in the input, extract them verbatim into "choices" and identify "correctLetter" (use any stated correct answer/explanation in the input if given). If no choices are given, return an empty array for "choices" and an empty string for "correctLetter".
 - "clues" should have 4-7 entries covering the most specific, high-yield details in the vignette.
@@ -141,7 +149,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 7500,
+        max_tokens: 8800,
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: vignetteText }]
       })
